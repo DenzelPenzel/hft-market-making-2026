@@ -116,6 +116,8 @@ fills = true
         allow_partial_fills: cfg.engine.allow_partial_fills,
         start_us: cfg.engine.start_us,
         end_us: cfg.engine.end_us,
+        horizon_mode: cfg.effective_horizon_mode(),
+        risk_horizon_ms: cfg.engine.risk_horizon_ms,
     };
     let run = engine::run(merged, &mut strat, &ecfg).expect("engine run ok");
 

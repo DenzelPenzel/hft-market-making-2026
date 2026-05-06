@@ -5,12 +5,23 @@ use crate::own_orders::OwnOrders;
 use crate::parser::{MdEvent, ParseError};
 use crate::strategy::{OrderAction, Strategy, TickCtx};
 use crate::types::{Side, Ts};
+use serde::Deserialize;
 
 pub struct EngineCfg {
     pub tick_ms: u64,
     pub allow_partial_fills: bool,
     pub start_us: Option<u64>,
     pub end_us: Option<u64>,
+    pub horizon_mode: HorizonMode,
+    pub risk_horizon_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HorizonMode {
+    Finite,
+    Infinite,
+    Rolling,
 }
 
 pub struct Run {
@@ -68,6 +79,8 @@ where
                 tick_us,
                 session_start: session_start.unwrap(),
                 end_us: cfg.end_us,
+                horizon_mode: cfg.horizon_mode,
+                risk_horizon_ms: cfg.risk_horizon_ms,
             };
             drain_due_ticks(
                 strategy,
@@ -105,6 +118,16 @@ where
                     position: metrics.position,
                     elapsed_ms: 0,
                     session_total_ms: 0,
+                    time_to_horizon_s: horizon_seconds(
+                        ts,
+                        TickTiming {
+                            tick_us,
+                            session_start: ts,
+                            end_us: cfg.end_us,
+                            horizon_mode: cfg.horizon_mode,
+                            risk_horizon_ms: cfg.risk_horizon_ms,
+                        },
+                    ),
                 });
                 next_tick = Some(ts);
             } else {
@@ -116,6 +139,8 @@ where
             tick_us,
             session_start: session_start.unwrap(),
             end_us: cfg.end_us,
+            horizon_mode: cfg.horizon_mode,
+            risk_horizon_ms: cfg.risk_horizon_ms,
         };
 
         drain_due_ticks(
@@ -143,6 +168,8 @@ struct TickTiming {
     tick_us: Ts,
     session_start: Ts,
     end_us: Option<Ts>,
+    horizon_mode: HorizonMode,
+    risk_horizon_ms: Option<u64>,
 }
 
 fn drain_due_ticks<S: Strategy>(
@@ -172,6 +199,7 @@ fn drain_due_ticks<S: Strategy>(
             position: metrics.position,
             elapsed_ms,
             session_total_ms: total_ms.max(1),
+            time_to_horizon_s: horizon_seconds(due, timing),
         };
 
         let actions = strategy.on_tick(&ctx);
@@ -182,6 +210,22 @@ fn drain_due_ticks<S: Strategy>(
         }
         *next_tick = Some(due + timing.tick_us);
     }
+}
+
+fn horizon_seconds(now_us: Ts, timing: TickTiming) -> f64 {
+    match timing.horizon_mode {
+        HorizonMode::Finite => timing
+            .end_us
+            .map(|end| end.saturating_sub(now_us) as f64 / 1_000_000.0)
+            .unwrap_or_else(|| fixed_risk_horizon_seconds(timing.risk_horizon_ms)),
+        HorizonMode::Infinite | HorizonMode::Rolling => {
+            fixed_risk_horizon_seconds(timing.risk_horizon_ms)
+        }
+    }
+}
+
+fn fixed_risk_horizon_seconds(risk_horizon_ms: Option<u64>) -> f64 {
+    risk_horizon_ms.unwrap_or(1_000) as f64 / 1_000.0
 }
 
 fn apply_actions(actions: &[OrderAction], own: &mut OwnOrders, ts: Ts) {
@@ -232,6 +276,21 @@ mod tests {
         }
     }
 
+    struct HorizonRecordingStrategy {
+        horizons: Vec<(Ts, f64)>,
+    }
+
+    impl Strategy for HorizonRecordingStrategy {
+        fn name(&self) -> &str {
+            "horizon_recording"
+        }
+
+        fn on_tick(&mut self, ctx: &TickCtx) -> Vec<OrderAction> {
+            self.horizons.push((ctx.ts_us, ctx.time_to_horizon_s));
+            Vec::new()
+        }
+    }
+
     #[test]
     fn engine_runs_and_yields_fills_on_cross() {
         let evs: Vec<Result<MdEvent, ParseError>> = vec![
@@ -254,6 +313,8 @@ mod tests {
             allow_partial_fills: true,
             start_us: None,
             end_us: Some(200_000),
+            horizon_mode: HorizonMode::Finite,
+            risk_horizon_ms: None,
         };
         let run = run(evs.into_iter(), &mut s, &cfg).unwrap();
         assert!(!run.fills.is_empty());
@@ -283,6 +344,8 @@ mod tests {
             allow_partial_fills: true,
             start_us: Some(50),
             end_us: Some(1_000_000),
+            horizon_mode: HorizonMode::Finite,
+            risk_horizon_ms: None,
         };
         let run = run(evs.into_iter(), &mut s, &cfg).unwrap();
         assert_eq!(run.session_end_us, 100); // second event filtered
@@ -310,6 +373,8 @@ mod tests {
             allow_partial_fills: true,
             start_us: None,
             end_us: Some(300_000),
+            horizon_mode: HorizonMode::Finite,
+            risk_horizon_ms: None,
         };
         let run = run(evs.into_iter(), &mut s, &cfg).unwrap();
         assert!(!run.metrics.equity_curve.is_empty());
@@ -337,6 +402,8 @@ mod tests {
             allow_partial_fills: true,
             start_us: None,
             end_us: Some(200_000),
+            horizon_mode: HorizonMode::Finite,
+            risk_horizon_ms: None,
         };
 
         let _ = run(evs.into_iter(), &mut s, &cfg).unwrap();
@@ -344,6 +411,83 @@ mod tests {
         assert_eq!(
             s.mids,
             vec![(0, px("101")), (100_000, px("101")), (200_000, px("101")),]
+        );
+    }
+
+    #[test]
+    fn finite_horizon_counts_down_to_end_in_seconds() {
+        let evs: Vec<Result<MdEvent, ParseError>> = vec![
+            Ok(MdEvent::BookUpdate(BookSnapshot {
+                ts_us: 0,
+                seq: 1,
+                bids: vec![(px("100"), 5)],
+                asks: vec![(px("102"), 5)],
+            })),
+            Ok(MdEvent::BookUpdate(BookSnapshot {
+                ts_us: 300_000,
+                seq: 2,
+                bids: vec![(px("100"), 5)],
+                asks: vec![(px("102"), 5)],
+            })),
+        ];
+        let mut s = HorizonRecordingStrategy {
+            horizons: Vec::new(),
+        };
+        let cfg = EngineCfg {
+            tick_ms: 100,
+            allow_partial_fills: true,
+            start_us: None,
+            end_us: Some(300_000),
+            horizon_mode: HorizonMode::Finite,
+            risk_horizon_ms: None,
+        };
+
+        let _ = run(evs.into_iter(), &mut s, &cfg).unwrap();
+
+        assert_eq!(
+            s.horizons,
+            vec![(0, 0.3), (100_000, 0.2), (200_000, 0.1), (300_000, 0.0),]
+        );
+    }
+
+    #[test]
+    fn infinite_horizon_uses_fixed_risk_horizon() {
+        let evs: Vec<Result<MdEvent, ParseError>> = vec![
+            Ok(MdEvent::BookUpdate(BookSnapshot {
+                ts_us: 0,
+                seq: 1,
+                bids: vec![(px("100"), 5)],
+                asks: vec![(px("102"), 5)],
+            })),
+            Ok(MdEvent::BookUpdate(BookSnapshot {
+                ts_us: 300_000,
+                seq: 2,
+                bids: vec![(px("100"), 5)],
+                asks: vec![(px("102"), 5)],
+            })),
+        ];
+        let mut s = HorizonRecordingStrategy {
+            horizons: Vec::new(),
+        };
+        let cfg = EngineCfg {
+            tick_ms: 100,
+            allow_partial_fills: true,
+            start_us: None,
+            end_us: None,
+            horizon_mode: HorizonMode::Infinite,
+            risk_horizon_ms: Some(3_600_000),
+        };
+
+        let _ = run(evs.into_iter(), &mut s, &cfg).unwrap();
+
+        assert_eq!(
+            s.horizons,
+            vec![
+                (0, 3600.0),
+                (100_000, 3600.0),
+                (200_000, 3600.0),
+                (300_000, 3600.0),
+            ]
         );
     }
 }

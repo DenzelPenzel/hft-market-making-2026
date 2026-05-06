@@ -44,11 +44,9 @@ impl Strategy for AvellanedaStoikov {
             Some(m) => m,
             None => return vec![],
         };
-        
+
         let mid_f = mid.0.to_f64().unwrap_or(0.0);
-        let total = ctx.session_total_ms.max(1) as f64;
-        let elapsed = (ctx.elapsed_ms as f64).min(total);
-        let tau = (total - elapsed) / total; // 1.0 → 0.0
+        let tau = ctx.time_to_horizon_s.max(0.0);
         let (r, half) = self.compute(mid_f, ctx.position, tau);
 
         let bid_f = r - half;
@@ -64,7 +62,7 @@ impl Strategy for AvellanedaStoikov {
         };
 
         let mut acts = vec![OrderAction::CancelAll];
-        
+
         if ctx.position < self.p.max_abs_inventory {
             acts.push(OrderAction::Place {
                 side: Side::Bid,
@@ -72,7 +70,7 @@ impl Strategy for AvellanedaStoikov {
                 qty: self.p.quote_qty,
             });
         }
-        
+
         if ctx.position > -self.p.max_abs_inventory {
             acts.push(OrderAction::Place {
                 side: Side::Ask,

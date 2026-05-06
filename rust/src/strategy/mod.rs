@@ -21,6 +21,7 @@ pub struct TickCtx<'a> {
     pub position: i64,
     pub elapsed_ms: u64,       // milliseconds since session start
     pub session_total_ms: u64, // for terminal-time τ = (T - t)
+    pub time_to_horizon_s: f64,
 }
 
 pub trait Strategy {

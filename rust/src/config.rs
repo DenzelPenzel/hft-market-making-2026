@@ -1,3 +1,4 @@
+use crate::engine::HorizonMode;
 use serde::Deserialize;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -16,6 +17,10 @@ pub struct EngineCfg {
     pub start_us: Option<u64>,
     #[serde(default)]
     pub end_us: Option<u64>,
+    #[serde(default)]
+    pub horizon_mode: Option<HorizonMode>,
+    #[serde(default)]
+    pub risk_horizon_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -82,6 +87,23 @@ impl Config {
         if self.engine.tick_ms == 0 {
             return Err(ConfigError::Validation("engine.tick_ms must be > 0".into()));
         }
+        if self.engine.risk_horizon_ms == Some(0) {
+            return Err(ConfigError::Validation(
+                "engine.risk_horizon_ms must be > 0".into(),
+            ));
+        }
+        if self.engine.horizon_mode == Some(HorizonMode::Finite) && self.engine.end_us.is_none() {
+            return Err(ConfigError::Validation(
+                "engine.horizon_mode=finite requires engine.end_us".into(),
+            ));
+        }
+        if self.engine.horizon_mode == Some(HorizonMode::Rolling)
+            && self.engine.risk_horizon_ms.is_none()
+        {
+            return Err(ConfigError::Validation(
+                "engine.horizon_mode=rolling requires engine.risk_horizon_ms".into(),
+            ));
+        }
         match self.strategy.kind.as_str() {
             "symmetric" => {
                 let s = self.strategy.symmetric.as_ref().ok_or_else(|| {
@@ -128,6 +150,16 @@ impl Config {
         }
         Ok(())
     }
+
+    pub fn effective_horizon_mode(&self) -> HorizonMode {
+        self.engine.horizon_mode.unwrap_or_else(|| {
+            if self.engine.end_us.is_some() {
+                HorizonMode::Finite
+            } else {
+                HorizonMode::Infinite
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -149,6 +181,7 @@ trades_csv = "trades.csv"
 [engine]
 tick_ms = 100
 allow_partial_fills = true
+risk_horizon_ms = 1000
 
 [strategy]
 kind = "avellaneda_stoikov"
@@ -171,6 +204,7 @@ fills = true
         let f = write_tmp(VALID_AS);
         let c = Config::from_path(f.path()).unwrap();
         assert_eq!(c.engine.tick_ms, 100);
+        assert_eq!(c.effective_horizon_mode(), HorizonMode::Infinite);
     }
 
     #[test]
@@ -188,6 +222,37 @@ fills = true
     #[test]
     fn rejects_unknown_kind() {
         let f = write_tmp(&VALID_AS.replace(r#"kind = "avellaneda_stoikov""#, r#"kind = "wat""#));
+        assert!(Config::from_path(f.path()).is_err());
+    }
+
+    #[test]
+    fn defaults_to_finite_when_end_us_is_set() {
+        let f = write_tmp(&VALID_AS.replace("risk_horizon_ms = 1000", "end_us = 1_000_000"));
+        let c = Config::from_path(f.path()).unwrap();
+        assert_eq!(c.effective_horizon_mode(), HorizonMode::Finite);
+    }
+
+    #[test]
+    fn accepts_explicit_infinite_horizon() {
+        let f = write_tmp(&VALID_AS.replace(
+            "risk_horizon_ms = 1000",
+            "horizon_mode = \"infinite\"\nrisk_horizon_ms = 3_600_000",
+        ));
+        let c = Config::from_path(f.path()).unwrap();
+        assert_eq!(c.effective_horizon_mode(), HorizonMode::Infinite);
+        assert_eq!(c.engine.risk_horizon_ms, Some(3_600_000));
+    }
+
+    #[test]
+    fn rejects_finite_horizon_without_end_us() {
+        let f = write_tmp(&VALID_AS.replace("risk_horizon_ms = 1000", "horizon_mode = \"finite\""));
+        assert!(Config::from_path(f.path()).is_err());
+    }
+
+    #[test]
+    fn rejects_rolling_horizon_without_risk_horizon() {
+        let f =
+            write_tmp(&VALID_AS.replace("risk_horizon_ms = 1000", "horizon_mode = \"rolling\""));
         assert!(Config::from_path(f.path()).is_err());
     }
 }

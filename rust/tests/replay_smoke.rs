@@ -2,7 +2,7 @@
 //! full engine using the SymmetricMM baseline and confirm the run produces
 //! at least one fill on a manufactured cross.
 
-use hft_mm_backtester::engine::{self, EngineCfg};
+use hft_mm_backtester::engine::{self, EngineCfg, HorizonMode};
 use hft_mm_backtester::parser::{lob, LobReader, MergedEvents, TradeReader};
 use hft_mm_backtester::strategy::symmetric::SymmetricMM;
 use std::fs::File;
@@ -60,6 +60,8 @@ fn smoke_replay_with_symmetric_yields_fills() {
         allow_partial_fills: true,
         start_us: None,
         end_us: None,
+        horizon_mode: HorizonMode::Infinite,
+        risk_horizon_ms: None,
     };
 
     let run = engine::run(merged, &mut strat, &cfg).expect("engine run ok");

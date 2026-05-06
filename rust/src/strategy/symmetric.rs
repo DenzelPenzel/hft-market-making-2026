@@ -72,6 +72,7 @@ mod tests {
             position: pos,
             elapsed_ms: 0,
             session_total_ms: 1000,
+            time_to_horizon_s: 1.0,
         }
     }
 

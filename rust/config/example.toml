@@ -5,6 +5,8 @@ trades_csv = "trades.csv"
 [engine]
 tick_ms = 100
 allow_partial_fills = true
+horizon_mode = "infinite"
+risk_horizon_ms = 3600000
 
 [strategy]
 kind = "avellaneda_stoikov"
